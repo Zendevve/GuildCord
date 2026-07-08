@@ -16,6 +16,7 @@ from ..world import opcodes as wop
 from ..world import resolver
 from ..world.chat import CHAT_TYPE_NAMES, ChatMessage
 from ..world.world_client import WorldClient
+from . import mentions
 
 log = logging.getLogger("guildcord")
 
@@ -38,6 +39,7 @@ class WowBridge:
 
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.members = True
         self.discord_client = discord.Client(intents=intents)
         self.discord_client.event(self.on_discord_message)
         self.discord_client.event(self.on_discord_ready)
@@ -81,9 +83,13 @@ class WowBridge:
                     "Discord channel %s not found/cached", mapping.discord_channel_id
                 )
                 continue
+            
+            # Resolve WoW mentions (@User) to Discord tags
+            resolved_message = mentions.resolve_wow_mentions(clean_message, channel)
+            
             sender = msg.sender_name or f"guid:{msg.sender_guid}"
             text = mapping.format.replace("%user", sender).replace(
-                "%message", clean_message
+                "%message", resolved_message
             )
             await channel.send(text)
 
@@ -110,7 +116,8 @@ class WowBridge:
             if chat_type is None:
                 continue
 
-            content = f"[Discord] {message.author.display_name}: {message.content}"
+            # Use clean_content to resolve Discord's mentions to plain text
+            content = f"[Discord] {message.author.display_name}: {message.clean_content}"
             try:
                 await self.world.send_chat(
                     chat_type, content, channel_name=mapping.wow_channel
