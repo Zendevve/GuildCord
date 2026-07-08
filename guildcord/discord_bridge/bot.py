@@ -47,6 +47,8 @@ class WowBridge:
         self.guild_motd: str = ""
         self.guild_members: list[GuildMemberInfo] = []
         self.wow_character_name: str | None = None
+        self.name_cache: dict[int, str] = {}
+        self.pending_chat_queues: dict[int, list[ChatMessage]] = {}
 
     # -----------------------------------------------------------
     # WoW -> Discord
@@ -68,10 +70,7 @@ class WowBridge:
             matches.append(mapping)
         return matches
 
-    async def on_wow_chat(self, msg: ChatMessage) -> None:
-        type_name = CHAT_TYPE_NAMES.get(msg.msg_type, str(msg.msg_type))
-        log.info("[WoW %s] guid=%s: %s", type_name, msg.sender_guid, msg.message)
-
+    async def _send_wow_chat_to_discord(self, msg: ChatMessage) -> None:
         clean_message = resolver.strip_color_coding(msg.message)
         clean_message = resolver.resolve_links(
             clean_message,
@@ -87,15 +86,52 @@ class WowBridge:
                     "Discord channel %s not found/cached", mapping.discord_channel_id
                 )
                 continue
-            
+
             # Resolve WoW mentions (@User) to Discord tags
             resolved_message = mentions.resolve_wow_mentions(clean_message, channel)
-            
+
             sender = msg.sender_name or f"guid:{msg.sender_guid}"
             text = mapping.format.replace("%user", sender).replace(
                 "%message", resolved_message
             )
-            await channel.send(text)
+            try:
+                await channel.send(text)
+            except Exception:
+                log.exception("failed to send message to Discord channel %s", mapping.discord_channel_id)
+
+    async def on_wow_chat(self, msg: ChatMessage) -> None:
+        type_name = CHAT_TYPE_NAMES.get(msg.msg_type, str(msg.msg_type))
+        log.info("[WoW %s] guid=%s: %s", type_name, msg.sender_guid, msg.message)
+
+        if msg.sender_guid == 0:
+            await self._send_wow_chat_to_discord(msg)
+            return
+
+        if msg.sender_guid in self.name_cache:
+            msg.sender_name = self.name_cache[msg.sender_guid]
+            await self._send_wow_chat_to_discord(msg)
+            return
+
+        # Request name from server and queue the message
+        if msg.sender_guid not in self.pending_chat_queues:
+            self.pending_chat_queues[msg.sender_guid] = []
+            try:
+                if self.world:
+                    await self.world.request_name_query(msg.sender_guid)
+            except Exception:
+                log.exception("failed to request name query for guid %s", msg.sender_guid)
+
+        self.pending_chat_queues[msg.sender_guid].append(msg)
+
+    async def on_wow_name_query_response(self, guid: int, name: str) -> None:
+        log.info("Resolved name for guid %s -> %s", guid, name)
+        self.name_cache[guid] = name
+
+        if guid in self.pending_chat_queues:
+            for msg in self.pending_chat_queues[guid]:
+                msg.sender_name = name
+                await self._send_wow_chat_to_discord(msg)
+            del self.pending_chat_queues[guid]
 
     # -----------------------------------------------------------
     # Discord -> WoW
@@ -275,27 +311,57 @@ class WowBridge:
 
     async def run(self) -> None:
         logging.basicConfig(level=logging.INFO)
-        await self.connect_wow()
-        assert self.world is not None
 
-        world_task = asyncio.create_task(
-            self.world.run(self.on_wow_chat, self.on_wow_guild_event, self.on_wow_guild_roster)
+        # Start the Discord bot in the background
+        discord_task = asyncio.create_task(
+            self.discord_client.start(self.config.discord.bot_token)
         )
 
-        async def roster_updater():
-            while True:
-                await asyncio.sleep(60)
-                try:
-                    if self.world:
-                        await self.world.request_guild_roster()
-                except Exception:
-                    pass
-
-        roster_task = asyncio.create_task(roster_updater())
-
         try:
-            await self.discord_client.start(self.config.discord.bot_token)
+            # Reconnection loop for WoW
+            while not self.discord_client.is_closed():
+                log.info("Connecting to WoW server...")
+                try:
+                    await self.connect_wow()
+                except Exception as exc:
+                    log.error("Failed to connect to WoW server: %s", exc)
+                    log.info("Retrying in 10 seconds...")
+                    await asyncio.sleep(10)
+                    continue
+
+                log.info("Connected to WoW server. Running event listener...")
+
+                # Start the periodic roster updater
+                async def roster_updater():
+                    while True:
+                        await asyncio.sleep(60)
+                        try:
+                            if self.world:
+                                await self.world.request_guild_roster()
+                        except Exception:
+                            pass
+
+                roster_task = asyncio.create_task(roster_updater())
+
+                try:
+                    # Run the world client receive loop
+                    await self.world.run(
+                        self.on_wow_chat,
+                        self.on_wow_guild_event,
+                        self.on_wow_guild_roster,
+                        self.on_wow_name_query_response,
+                    )
+                except Exception as exc:
+                    log.error("WoW client run loop encountered error: %s", exc)
+                finally:
+                    roster_task.cancel()
+                    if self.world:
+                        await self.world.close()
+                        self.world = None
+
+                log.info("Disconnected from WoW server. Reconnecting in 10 seconds...")
+                await asyncio.sleep(10)
+
         finally:
-            roster_task.cancel()
-            await self.world.close()
-            world_task.cancel()
+            await self.discord_client.close()
+            await discord_task

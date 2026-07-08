@@ -50,6 +50,22 @@ def _read_cstring(buf: bytes, offset: int) -> tuple[str, int]:
     return buf[offset:end].decode("utf-8", errors="replace"), end + 1
 
 
+def unpack_guid(body: bytes, offset: int) -> tuple[int, int]:
+    """Unpacks a WoW packed GUID. Returns (guid, new_offset)."""
+    if offset >= len(body):
+        return 0, offset
+    mask = body[offset]
+    offset += 1
+    guid = 0
+    for i in range(8):
+        if (mask & (1 << i)) != 0:
+            if offset >= len(body):
+                break
+            guid |= body[offset] << (i * 8)
+            offset += 1
+    return guid, offset
+
+
 def decode_messagechat(body: bytes) -> ChatMessage:
     offset = 0
     msg_type = body[offset]
@@ -225,3 +241,23 @@ def decode_guild_roster(body: bytes) -> tuple[str, list[GuildMemberInfo]]:
             )
         )
     return motd, members
+
+
+def decode_name_query_response(body: bytes) -> tuple[int, str]:
+    """
+    Decodes SMSG_NAME_QUERY response body for WotLK.
+    Returns (guid, name).
+    """
+    offset = 0
+    guid, offset = unpack_guid(body, offset)
+    if offset >= len(body):
+        return guid, "UNKNOWN"
+
+    name_known = body[offset]
+    offset += 1
+    if name_known == 0:
+        name_end = body.index(b"\x00", offset)
+        name = body[offset:name_end].decode("utf-8", errors="replace")
+        return guid, name
+
+    return guid, "UNKNOWN"

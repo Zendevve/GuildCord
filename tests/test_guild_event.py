@@ -105,6 +105,29 @@ def test_decode_guild_roster():
     print("test_decode_guild_roster passed.")
 
 
+def test_decode_name_query_response():
+    # Constructing a sample WotLK SMSG_NAME_QUERY packet body:
+    # Packed GUID: mask=0x01, val=123 (equivalent to 123)
+    # name_known (uint8) = 0
+    # name (cstring) = "Bob"
+    # realm_name (cstring) = ""
+    # race (uint8) = 1
+    # gender (uint8) = 0
+    # char_class (uint8) = 1
+    import struct
+    body = struct.pack("<BB", 0x01, 123)  # packed guid: mask 1, val 123
+    body += struct.pack("<B", 0)           # name known = 0 (yes)
+    body += b"Bob\x00"                     # name
+    body += b"\x00"                        # realm name (empty)
+    body += struct.pack("<BBB", 1, 0, 1)   # race, gender, class
+    
+    guid, name = chat.decode_name_query_response(body)
+    assert guid == 123
+    assert name == "Bob"
+    print("test_decode_name_query_response passed.")
+
+
 if __name__ == "__main__":
     test_decode_guild_event()
     test_decode_guild_roster()
+    test_decode_name_query_response()

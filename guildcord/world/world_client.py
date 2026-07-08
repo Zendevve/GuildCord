@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 from . import opcodes
-from .chat import ChatMessage, decode_messagechat, encode_messagechat, decode_guild_event, decode_guild_roster, GuildMemberInfo
+from .chat import ChatMessage, decode_messagechat, encode_messagechat, decode_guild_event, decode_guild_roster, GuildMemberInfo, decode_name_query_response
 from .crypto import WorldCrypto
 
 ChatCallback = Callable[[ChatMessage], Awaitable[None]]
@@ -282,6 +282,10 @@ class WorldClient:
     async def request_guild_roster(self) -> None:
         await self._send_client_packet(opcodes.CMSG_GUILD_ROSTER, b"")
 
+    async def request_name_query(self, guid: int) -> None:
+        body = struct.pack("<Q", guid)
+        await self._send_client_packet(opcodes.CMSG_NAME_QUERY, body)
+
     async def _send_ping(self, sequence: int) -> None:
         body = struct.pack("<II", sequence, 50)  # sequence, latency(ms) placeholder
         await self._send_client_packet(opcodes.CMSG_PING, body)
@@ -291,10 +295,11 @@ class WorldClient:
         on_chat: ChatCallback,
         on_guild_event: Callable[[int, list[str]], Awaitable[None]] | None = None,
         on_guild_roster: Callable[[str, list[GuildMemberInfo]], Awaitable[None]] | None = None,
+        on_name_query_response: Callable[[int, str], Awaitable[None]] | None = None,
     ) -> None:
         """
         Main receive loop. Dispatches SMSG_MESSAGECHAT, SMSG_GUILD_EVENT,
-        and SMSG_GUILD_ROSTER to their respective callbacks.
+        SMSG_GUILD_ROSTER, and SMSG_NAME_QUERY to their respective callbacks.
         """
         self._chat_callback = on_chat
         self._running = True
@@ -334,6 +339,13 @@ class WorldClient:
                         except (struct.error, IndexError, ValueError):
                             continue
                         await on_guild_roster(motd, members)
+                elif op == opcodes.SMSG_NAME_QUERY:
+                    if on_name_query_response:
+                        try:
+                            guid, name = decode_name_query_response(body)
+                        except (struct.error, IndexError, ValueError):
+                            continue
+                        await on_name_query_response(guid, name)
         finally:
             ping_task.cancel()
             self._running = False
