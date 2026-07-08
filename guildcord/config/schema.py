@@ -37,6 +37,7 @@ class WowConfig:
 class DiscordConfig:
     bot_token: str
     command_prefix: str = "!"
+    item_database: Optional[str] = None
 
 
 @dataclass
@@ -68,6 +69,7 @@ def load_config(path: str) -> BridgeConfig:
     discord = DiscordConfig(
         bot_token=discord_raw["bot_token"],
         command_prefix=discord_raw.get("command_prefix", "!"),
+        item_database=discord_raw.get("item_database"),
     )
 
     channels = []

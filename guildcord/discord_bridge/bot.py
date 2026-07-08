@@ -13,6 +13,7 @@ import discord
 from ..auth.auth_client import AuthClient
 from ..config.schema import BridgeConfig, ChannelMapping
 from ..world import opcodes as wop
+from ..world import resolver
 from ..world.chat import CHAT_TYPE_NAMES, ChatMessage
 from ..world.world_client import WorldClient
 
@@ -65,6 +66,13 @@ class WowBridge:
         type_name = CHAT_TYPE_NAMES.get(msg.msg_type, str(msg.msg_type))
         log.info("[WoW %s] guid=%s: %s", type_name, msg.sender_guid, msg.message)
 
+        clean_message = resolver.strip_color_coding(msg.message)
+        clean_message = resolver.resolve_links(
+            clean_message,
+            client_build=self.config.wow.client_build,
+            link_site=self.config.discord.item_database,
+        )
+
         mappings = self._find_mapping_for_wow_message(msg)
         for mapping in mappings:
             channel = self.discord_client.get_channel(mapping.discord_channel_id)
@@ -75,7 +83,7 @@ class WowBridge:
                 continue
             sender = msg.sender_name or f"guid:{msg.sender_guid}"
             text = mapping.format.replace("%user", sender).replace(
-                "%message", msg.message
+                "%message", clean_message
             )
             await channel.send(text)
 
