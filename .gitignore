@@ -1,0 +1,25 @@
+# GuildCord Gitignore
+
+# Reference files (clean-room compliance)
+refs/
+
+# Configuration and secrets
+config.yaml
+
+# Python caches and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE files
+.vscode/
+.idea/

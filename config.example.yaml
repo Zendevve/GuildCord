@@ -1,0 +1,39 @@
+# guildcord config — copy to config.yaml and fill in.
+
+wow:
+  auth_host: "127.0.0.1"      # your realmd/authserver address
+  auth_port: 3724
+  world_port: 8085            # from the realmlist entry for your realm
+  account: "BRIDGEBOT"
+  password: "changeme"
+  realm_name: "MyRealm"
+  realm_id: 1
+  client_build: 12340         # 3.3.5a
+  platform: "Windows"         # "Windows" or "Mac" (Mac uses dynamic Warden bypass mode if supported)
+
+  # Optional: set this to skip SMSG_CHAR_ENUM parsing (the most
+  # version-fragile part of the protocol) and log straight into a known
+  # character. Get the GUID from your server's character table, or let
+  # the bot try auto-enum first and fall back to setting this if it fails.
+  # character_guid: 123
+
+discord:
+  bot_token: "YOUR_DISCORD_BOT_TOKEN"
+  command_prefix: "!"
+
+channels:
+  - chat_type: "say"
+    discord_channel_id: 111111111111111111
+    direction: "both"
+    format: "**%user**: %message"
+
+  - chat_type: "guild"
+    discord_channel_id: 222222222222222222
+    direction: "both"
+    format: "🛡️ **%user**: %message"
+
+  - chat_type: "channel"
+    wow_channel: "General"
+    discord_channel_id: 333333333333333333
+    direction: "wow_to_discord"
+    format: "[General] **%user**: %message"
