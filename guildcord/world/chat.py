@@ -271,3 +271,63 @@ def decode_name_query_response(body: bytes) -> tuple[int, str]:
         return guid, name
 
     return guid, "UNKNOWN"
+
+
+@dataclass
+class WhoMemberInfo:
+    name: str
+    guild_name: str
+    level: int
+    char_class: int
+    race: int
+    gender: int
+    zone_id: int
+
+
+def decode_who_response(body: bytes) -> list[WhoMemberInfo]:
+    """
+    Decodes SMSG_WHO body for WotLK.
+    """
+    if len(body) < 8:
+        return []
+    offset = 0
+    (display_count, match_count) = struct.unpack_from("<II", body, offset)
+    offset += 8
+
+    results = []
+    for _ in range(display_count):
+        if offset >= len(body):
+            break
+        name_end = body.index(b"\x00", offset)
+        name = body[offset:name_end].decode("utf-8", errors="replace")
+        offset = name_end + 1
+
+        guild_end = body.index(b"\x00", offset)
+        guild = body[offset:guild_end].decode("utf-8", errors="replace")
+        offset = guild_end + 1
+
+        if offset + 12 >= len(body):
+            break
+        (level, char_class, race) = struct.unpack_from("<III", body, offset)
+        offset += 12
+
+        gender = body[offset]
+        offset += 1
+
+        if offset + 4 > len(body):
+            break
+        (zone_id,) = struct.unpack_from("<I", body, offset)
+        offset += 4
+
+        results.append(
+            WhoMemberInfo(
+                name=name,
+                guild_name=guild,
+                level=level,
+                char_class=char_class,
+                race=race,
+                gender=gender,
+                zone_id=zone_id,
+            )
+        )
+    return results

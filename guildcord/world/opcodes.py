@@ -47,6 +47,10 @@ GE_SIGNED_OFF = 0x0D
 CMSG_PING = 0x1DC
 SMSG_PONG = 0x1DD
 
+# --- who query ---
+CMSG_WHO = 0x062
+SMSG_WHO = 0x063
+
 # AuthResponse result codes (subset)
 AUTH_OK = 0x0C
 AUTH_UNKNOWN_ACCOUNT = 0x15

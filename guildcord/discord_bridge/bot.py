@@ -14,7 +14,7 @@ from ..auth.auth_client import AuthClient
 from ..config.schema import BridgeConfig, ChannelMapping
 from ..world import opcodes as wop
 from ..world import resolver
-from ..world.chat import CHAT_TYPE_NAMES, ChatMessage, GuildMemberInfo
+from ..world.chat import CHAT_TYPE_NAMES, ChatMessage, GuildMemberInfo, WhoMemberInfo
 from ..world.world_client import WorldClient
 from . import mentions
 
@@ -29,6 +29,38 @@ CHAT_TYPE_BY_NAME = {
     "yell": wop.CHAT_MSG_YELL,
     "whisper": wop.CHAT_MSG_WHISPER,
     "channel": wop.CHAT_MSG_CHANNEL,
+}
+
+
+RACE_NAMES = {
+    1: "Human",
+    2: "Orc",
+    3: "Dwarf",
+    4: "Night Elf",
+    5: "Undead",
+    6: "Tauren",
+    7: "Gnome",
+    8: "Troll",
+    10: "Blood Elf",
+    11: "Draenei",
+}
+
+CLASS_NAMES = {
+    1: "Warrior",
+    2: "Paladin",
+    3: "Hunter",
+    4: "Rogue",
+    5: "Priest",
+    6: "Death Knight",
+    7: "Shaman",
+    8: "Mage",
+    9: "Warlock",
+    11: "Druid",
+}
+
+GENDER_NAMES = {
+    0: "Male",
+    1: "Female",
 }
 
 
@@ -49,6 +81,8 @@ class WowBridge:
         self.wow_character_name: str | None = None
         self.name_cache: dict[int, str] = {}
         self.pending_chat_queues: dict[int, list[ChatMessage]] = {}
+        self.last_who_channel_id: int | None = None
+        self.last_who_query: str | None = None
 
     # -----------------------------------------------------------
     # WoW -> Discord
@@ -188,7 +222,7 @@ class WowBridge:
             parts = message.content[len(prefix):].strip().split()
             if parts:
                 cmd = parts[0].lower()
-                if cmd in ("online", "who"):
+                if cmd == "online" or (cmd == "who" and len(parts) == 1):
                     online_list = [m.name for m in self.guild_members if m.is_online]
                     if not online_list:
                         await message.channel.send("Currently no guild members online.")
@@ -197,6 +231,15 @@ class WowBridge:
                         await message.channel.send(
                             f"Currently {len(online_list)} member(s) online: {members_str}"
                         )
+                    return
+                elif cmd == "who" and len(parts) > 1:
+                    query = " ".join(parts[1:])
+                    self.last_who_channel_id = message.channel.id
+                    self.last_who_query = query
+                    try:
+                        await self.world.request_who(query)
+                    except Exception:
+                        log.exception("failed to request world who query")
                     return
                 elif cmd == "gmotd":
                     if self.guild_motd:
@@ -289,6 +332,57 @@ class WowBridge:
     async def on_wow_guild_roster(self, motd: str, members: list[GuildMemberInfo]) -> None:
         self.guild_motd = motd
         self.guild_members = members
+
+    async def on_wow_who_response(self, results: list[WhoMemberInfo]) -> None:
+        if self.last_who_channel_id is None:
+            return
+
+        channel = self.discord_client.get_channel(self.last_who_channel_id)
+        if channel is None:
+            return
+
+        query = self.last_who_query or ""
+
+        if not results:
+            # Check if there is an offline guild roster member matching the name
+            offline_match = None
+            for m in self.guild_members:
+                if m.name.lower() == query.lower():
+                    offline_match = m
+                    break
+
+            if offline_match:
+                cls_name = CLASS_NAMES.get(offline_match.char_class, "Unknown Class")
+                # Format last seen details
+                days = int(offline_match.last_logoff)
+                hours = int((offline_match.last_logoff * 24) % 24)
+                minutes = int((offline_match.last_logoff * 24 * 60) % 60)
+
+                minutes_str = f" {minutes} minute{'s' if minutes != 1 else ''}"
+                hours_str = f" {hours} hour{'s' if hours != 1 else ''}," if hours > 0 else ""
+                days_str = f" {days} day{'s' if days != 1 else ''}," if days > 0 else ""
+
+                await channel.send(
+                    f"**{offline_match.name}** is a level {offline_match.level} {cls_name} currently offline. "
+                    f"Last seen{days_str}{hours_str}{minutes_str} ago."
+                )
+            else:
+                await channel.send(f"No player matching '{query}' found online.")
+        else:
+            # Send at most 3 results
+            for r in results[:3]:
+                gender_str = GENDER_NAMES.get(r.gender, "")
+                race_str = RACE_NAMES.get(r.race, "Unknown Race")
+                class_str = CLASS_NAMES.get(r.char_class, "Unknown Class")
+                guild_str = f" <{r.guild_name}>" if r.guild_name else ""
+                gender_prefix = f" {gender_str}" if gender_str else ""
+
+                await channel.send(
+                    f"**{r.name}**{guild_str} is a level {r.level}{gender_prefix} {race_str} {class_str} currently in Zone {r.zone_id}."
+                )
+
+        self.last_who_channel_id = None
+        self.last_who_query = None
 
     # -----------------------------------------------------------
     # lifecycle
@@ -392,6 +486,7 @@ class WowBridge:
                         self.on_wow_guild_event,
                         self.on_wow_guild_roster,
                         self.on_wow_name_query_response,
+                        self.on_wow_who_response,
                     )
                 except Exception as exc:
                     log.error("WoW client run loop encountered error: %s", exc)

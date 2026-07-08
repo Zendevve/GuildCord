@@ -152,8 +152,39 @@ def test_decode_messagechat_achievement():
     print("test_decode_messagechat_achievement passed.")
 
 
+def test_decode_who_response():
+    # Constructing a sample WotLK SMSG_WHO packet body:
+    # display_count (uint32) = 1
+    # match_count (uint32) = 1
+    # Player 1:
+    #   name (cstring) = "Bob"
+    #   guild (cstring) = "Knights of Stormwind"
+    #   level (uint32) = 80
+    #   char_class (uint32) = 1 (Warrior)
+    #   race (uint32) = 1 (Human)
+    #   gender (uint8) = 0 (Male)
+    #   zone_id (uint32) = 1519 (Stormwind City)
+    import struct
+    body = struct.pack("<II", 1, 1)
+    body += b"Bob\x00"
+    body += b"Knights of Stormwind\x00"
+    body += struct.pack("<IIIBI", 80, 1, 1, 0, 1519)
+
+    results = chat.decode_who_response(body)
+    assert len(results) == 1
+    assert results[0].name == "Bob"
+    assert results[0].guild_name == "Knights of Stormwind"
+    assert results[0].level == 80
+    assert results[0].char_class == 1
+    assert results[0].race == 1
+    assert results[0].gender == 0
+    assert results[0].zone_id == 1519
+    print("test_decode_who_response passed.")
+
+
 if __name__ == "__main__":
     test_decode_guild_event()
     test_decode_guild_roster()
     test_decode_name_query_response()
     test_decode_messagechat_achievement()
+    test_decode_who_response()

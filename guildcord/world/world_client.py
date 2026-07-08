@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 from . import opcodes
-from .chat import ChatMessage, decode_messagechat, encode_messagechat, decode_guild_event, decode_guild_roster, GuildMemberInfo, decode_name_query_response
+from .chat import ChatMessage, decode_messagechat, encode_messagechat, decode_guild_event, decode_guild_roster, GuildMemberInfo, decode_name_query_response, decode_who_response, WhoMemberInfo
 from .crypto import WorldCrypto
 
 ChatCallback = Callable[[ChatMessage], Awaitable[None]]
@@ -286,6 +286,23 @@ class WorldClient:
         body = struct.pack("<Q", guid)
         await self._send_client_packet(opcodes.CMSG_NAME_QUERY, body)
 
+    async def request_who(self, query: str) -> None:
+        # Build who message
+        # WotLK format:
+        # uint32 level_min (0)
+        # uint32 level_max (100)
+        # cstring player_name (query)
+        # cstring guild_name ("")
+        # uint32 race_mask (0xFFFFFFFF)
+        # uint32 class_mask (0xFFFFFFFF)
+        # uint32 zones_count (0)
+        # uint32 strings_count (0)
+        body = struct.pack("<II", 0, 100)
+        body += query.encode("utf-8") + b"\x00"
+        body += b"\x00"  # guild name (empty)
+        body += struct.pack("<IIII", 0xFFFFFFFF, 0xFFFFFFFF, 0, 0)
+        await self._send_client_packet(opcodes.CMSG_WHO, body)
+
     async def _send_ping(self, sequence: int) -> None:
         body = struct.pack("<II", sequence, 50)  # sequence, latency(ms) placeholder
         await self._send_client_packet(opcodes.CMSG_PING, body)
@@ -296,10 +313,11 @@ class WorldClient:
         on_guild_event: Callable[[int, list[str]], Awaitable[None]] | None = None,
         on_guild_roster: Callable[[str, list[GuildMemberInfo]], Awaitable[None]] | None = None,
         on_name_query_response: Callable[[int, str], Awaitable[None]] | None = None,
+        on_who_response: Callable[[list[WhoMemberInfo]], Awaitable[None]] | None = None,
     ) -> None:
         """
         Main receive loop. Dispatches SMSG_MESSAGECHAT, SMSG_GUILD_EVENT,
-        SMSG_GUILD_ROSTER, and SMSG_NAME_QUERY to their respective callbacks.
+        SMSG_GUILD_ROSTER, SMSG_NAME_QUERY, and SMSG_WHO to their respective callbacks.
         """
         self._chat_callback = on_chat
         self._running = True
@@ -346,6 +364,13 @@ class WorldClient:
                         except (struct.error, IndexError, ValueError):
                             continue
                         await on_name_query_response(guid, name)
+                elif op == opcodes.SMSG_WHO:
+                    if on_who_response:
+                        try:
+                            results = decode_who_response(body)
+                        except (struct.error, IndexError, ValueError):
+                            continue
+                        await on_who_response(results)
         finally:
             ping_task.cancel()
             self._running = False
