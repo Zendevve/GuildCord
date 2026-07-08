@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 from . import opcodes
-from .chat import ChatMessage, decode_messagechat, encode_messagechat, decode_guild_event
+from .chat import ChatMessage, decode_messagechat, encode_messagechat, decode_guild_event, decode_guild_roster, GuildMemberInfo
 from .crypto import WorldCrypto
 
 ChatCallback = Callable[[ChatMessage], Awaitable[None]]
@@ -279,6 +279,9 @@ class WorldClient:
         body += password.encode("utf-8") + b"\x00"
         await self._send_client_packet(opcodes.CMSG_JOIN_CHANNEL, body)
 
+    async def request_guild_roster(self) -> None:
+        await self._send_client_packet(opcodes.CMSG_GUILD_ROSTER, b"")
+
     async def _send_ping(self, sequence: int) -> None:
         body = struct.pack("<II", sequence, 50)  # sequence, latency(ms) placeholder
         await self._send_client_packet(opcodes.CMSG_PING, body)
@@ -287,10 +290,11 @@ class WorldClient:
         self,
         on_chat: ChatCallback,
         on_guild_event: Callable[[int, list[str]], Awaitable[None]] | None = None,
+        on_guild_roster: Callable[[str, list[GuildMemberInfo]], Awaitable[None]] | None = None,
     ) -> None:
         """
-        Main receive loop. Dispatches SMSG_MESSAGECHAT to `on_chat` and
-        SMSG_GUILD_EVENT to `on_guild_event`, keeping connection alive.
+        Main receive loop. Dispatches SMSG_MESSAGECHAT, SMSG_GUILD_EVENT,
+        and SMSG_GUILD_ROSTER to their respective callbacks.
         """
         self._chat_callback = on_chat
         self._running = True
@@ -323,6 +327,13 @@ class WorldClient:
                         except (struct.error, IndexError, ValueError):
                             continue
                         await on_guild_event(event_type, strings)
+                elif op == opcodes.SMSG_GUILD_ROSTER:
+                    if on_guild_roster:
+                        try:
+                            motd, members = decode_guild_roster(body)
+                        except (struct.error, IndexError, ValueError):
+                            continue
+                        await on_guild_roster(motd, members)
         finally:
             ping_task.cancel()
             self._running = False

@@ -142,3 +142,86 @@ def decode_guild_event(body: bytes) -> tuple[int, list[str]]:
         strings.append(body[offset:end].decode("utf-8", errors="replace"))
         offset = end + 1
     return event_type, strings
+
+
+@dataclass
+class GuildMemberInfo:
+    guid: int
+    is_online: bool
+    name: str
+    level: int
+    char_class: int
+    zone_id: int
+    last_logoff: float
+
+
+def decode_guild_roster(body: bytes) -> tuple[str, list[GuildMemberInfo]]:
+    """
+    Decodes SMSG_GUILD_ROSTER body for WotLK.
+    Returns (motd, members_list).
+    """
+    if len(body) < 8:
+        raise ValueError("guild roster packet too short")
+    offset = 0
+    (num_members,) = struct.unpack_from("<I", body, offset)
+    offset += 4
+
+    # Read motd string
+    motd_end = body.index(b"\x00", offset)
+    motd = body[offset:motd_end].decode("utf-8", errors="replace")
+    offset = motd_end + 1
+
+    # Read guild info string
+    info_end = body.index(b"\x00", offset)
+    _info = body[offset:info_end].decode("utf-8", errors="replace")
+    offset = info_end + 1
+
+    # Read ranks count and skip rank details (4 bytes each)
+    (num_ranks,) = struct.unpack_from("<I", body, offset)
+    offset += 4
+    offset += num_ranks * 4  # skip rank rights/flags
+
+    members = []
+    for _ in range(num_members):
+        if offset >= len(body):
+            break
+        (guid, is_online) = struct.unpack_from("<QB", body, offset)
+        offset += 9
+
+        name_end = body.index(b"\x00", offset)
+        name = body[offset:name_end].decode("utf-8", errors="replace")
+        offset = name_end + 1
+
+        offset += 4  # skip rank ID (uint32)
+
+        (level, char_class) = struct.unpack_from("<BB", body, offset)
+        offset += 2
+
+        (zone_id,) = struct.unpack_from("<I", body, offset)
+        offset += 4
+
+        last_logoff = 0.0
+        if not is_online:
+            (last_logoff,) = struct.unpack_from("<f", body, offset)
+            offset += 4
+
+        # Skip public note string
+        note_end = body.index(b"\x00", offset)
+        offset = note_end + 1
+
+        # Skip officer note string
+        off_end = body.index(b"\x00", offset)
+        offset = off_end + 1
+
+        members.append(
+            GuildMemberInfo(
+                guid=guid,
+                is_online=bool(is_online),
+                name=name,
+                level=level,
+                char_class=char_class,
+                zone_id=zone_id,
+                last_logoff=last_logoff,
+            )
+        )
+    return motd, members

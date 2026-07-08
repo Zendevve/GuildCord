@@ -14,7 +14,7 @@ from ..auth.auth_client import AuthClient
 from ..config.schema import BridgeConfig, ChannelMapping
 from ..world import opcodes as wop
 from ..world import resolver
-from ..world.chat import CHAT_TYPE_NAMES, ChatMessage
+from ..world.chat import CHAT_TYPE_NAMES, ChatMessage, GuildMemberInfo
 from ..world.world_client import WorldClient
 from . import mentions
 
@@ -43,6 +43,10 @@ class WowBridge:
         self.discord_client = discord.Client(intents=intents)
         self.discord_client.event(self.on_discord_message)
         self.discord_client.event(self.on_discord_ready)
+
+        self.guild_motd: str = ""
+        self.guild_members: list[GuildMemberInfo] = []
+        self.wow_character_name: str | None = None
 
     # -----------------------------------------------------------
     # WoW -> Discord
@@ -105,6 +109,32 @@ class WowBridge:
             return
         if self.world is None:
             return
+
+        # Handle local commands
+        prefix = self.config.discord.command_prefix
+        if message.content.startswith(prefix):
+            parts = message.content[len(prefix):].strip().split()
+            if parts:
+                cmd = parts[0].lower()
+                if cmd in ("online", "who"):
+                    online_list = [m.name for m in self.guild_members if m.is_online]
+                    if not online_list:
+                        await message.channel.send("Currently no guild members online.")
+                    else:
+                        members_str = ", ".join(online_list)
+                        await message.channel.send(
+                            f"Currently {len(online_list)} member(s) online: {members_str}"
+                        )
+                    return
+                elif cmd == "gmotd":
+                    if self.guild_motd:
+                        await message.channel.send(f"📢 **Guild MotD:** {self.guild_motd}")
+                    else:
+                        await message.channel.send("No Guild MotD has been fetched yet.")
+                    return
+                # If command prefix matched but command unrecognized, fall through (or ignore/return)
+                # To prevent spamming raw unrecognized commands into WoW, we return here
+                return
 
         for mapping in self.config.channels:
             if mapping.direction not in ("discord_to_wow", "both"):
@@ -178,6 +208,10 @@ class WowBridge:
 
         await channel.send(message)
 
+    async def on_wow_guild_roster(self, motd: str, members: list[GuildMemberInfo]) -> None:
+        self.guild_motd = motd
+        self.guild_members = members
+
     # -----------------------------------------------------------
     # lifecycle
     # -----------------------------------------------------------
@@ -234,6 +268,10 @@ class WowBridge:
                     log.exception("failed to join WoW channel %s", mapping.wow_channel)
 
         self.world = world
+        try:
+            await world.request_guild_roster()
+        except Exception:
+            log.exception("failed to request initial guild roster")
 
     async def run(self) -> None:
         logging.basicConfig(level=logging.INFO)
@@ -241,10 +279,23 @@ class WowBridge:
         assert self.world is not None
 
         world_task = asyncio.create_task(
-            self.world.run(self.on_wow_chat, self.on_wow_guild_event)
+            self.world.run(self.on_wow_chat, self.on_wow_guild_event, self.on_wow_guild_roster)
         )
+
+        async def roster_updater():
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    if self.world:
+                        await self.world.request_guild_roster()
+                except Exception:
+                    pass
+
+        roster_task = asyncio.create_task(roster_updater())
+
         try:
             await self.discord_client.start(self.config.discord.bot_token)
         finally:
+            roster_task.cancel()
             await self.world.close()
             world_task.cancel()
