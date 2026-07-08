@@ -38,6 +38,8 @@ class DiscordConfig:
     bot_token: str
     command_prefix: str = "!"
     item_database: Optional[str] = None
+    enable_dot_commands: bool = False
+    dot_commands_whitelist: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -70,6 +72,8 @@ def load_config(path: str) -> BridgeConfig:
         bot_token=discord_raw["bot_token"],
         command_prefix=discord_raw.get("command_prefix", "!"),
         item_database=discord_raw.get("item_database"),
+        enable_dot_commands=discord_raw.get("enable_dot_commands", False),
+        dot_commands_whitelist=discord_raw.get("dot_commands_whitelist", []),
     )
 
     channels = []

@@ -133,6 +133,35 @@ class WowBridge:
                 await self._send_wow_chat_to_discord(msg)
             del self.pending_chat_queues[guid]
 
+    def should_send_directly(self, message: str) -> bool:
+        if not message.startswith("."):
+            return False
+        cfg = self.config.discord
+        if not cfg.enable_dot_commands:
+            return False
+
+        whitelist = cfg.dot_commands_whitelist
+        if not whitelist:
+            return True
+
+        trimmed = message[1:].lower().strip()
+        words = trimmed.split()
+        if not words:
+            return False
+        first_word = words[0]
+
+        if first_word in whitelist:
+            return True
+
+        # Check wildcard matching (e.g. "s*")
+        for item in whitelist:
+            if item.endswith("*"):
+                prefix = item[:-1].lower()
+                if trimmed.startswith(prefix):
+                    return True
+
+        return False
+
     # -----------------------------------------------------------
     # Discord -> WoW
     # -----------------------------------------------------------
@@ -182,8 +211,14 @@ class WowBridge:
             if chat_type is None:
                 continue
 
-            # Use clean_content to resolve Discord's mentions to plain text
-            content = f"[Discord] {message.author.display_name}: {message.clean_content}"
+            # If dot command option is enabled and matched, send directly. Otherwise send formatted.
+            if self.should_send_directly(message.content):
+                content = message.clean_content
+            else:
+                content = f"[Discord] {message.author.display_name}: {message.clean_content}"
+                if content.startswith("."):
+                    content = " " + content
+
             try:
                 await self.world.send_chat(
                     chat_type, content, channel_name=mapping.wow_channel

@@ -58,7 +58,43 @@ def test_resolve_links():
     print("test_resolve_links passed.")
 
 
+def test_should_send_directly():
+    from guildcord.config.schema import BridgeConfig, WowConfig, DiscordConfig
+    from guildcord.discord_bridge.bot import WowBridge
+
+    # Setup configurations
+    wow_cfg = WowConfig(
+        auth_host="127.0.0.1", auth_port=3724, world_port=8085,
+        account="TEST", password="pwd", realm_name="Realm"
+    )
+
+    # 1. Dot commands disabled by default
+    discord_cfg = DiscordConfig(bot_token="tok", enable_dot_commands=False)
+    bridge = WowBridge(BridgeConfig(wow=wow_cfg, discord=discord_cfg))
+    assert bridge.should_send_directly(".s info") is False
+
+    # 2. Dot commands enabled, no whitelist (allows everything starting with .)
+    discord_cfg2 = DiscordConfig(bot_token="tok", enable_dot_commands=True)
+    bridge2 = WowBridge(BridgeConfig(wow=wow_cfg, discord=discord_cfg2))
+    assert bridge2.should_send_directly(".s info") is True
+    assert bridge2.should_send_directly("hello") is False
+
+    # 3. Whitelist set
+    discord_cfg3 = DiscordConfig(
+        bot_token="tok",
+        enable_dot_commands=True,
+        dot_commands_whitelist=["s", "lookup*"]
+    )
+    bridge3 = WowBridge(BridgeConfig(wow=wow_cfg, discord=discord_cfg3))
+    assert bridge3.should_send_directly(".s info") is True
+    assert bridge3.should_send_directly(".lookup item 123") is True
+    assert bridge3.should_send_directly(".teleport home") is False
+
+    print("test_should_send_directly passed.")
+
+
 if __name__ == "__main__":
     test_strip_color_coding()
     test_resolve_links()
+    test_should_send_directly()
     print("All resolver tests passed successfully.")

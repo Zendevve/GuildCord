@@ -20,6 +20,8 @@ wow:
 discord:
   bot_token: "YOUR_DISCORD_BOT_TOKEN"
   command_prefix: "!"
+  enable_dot_commands: false             # Set to true to allow direct server commands from Discord
+  dot_commands_whitelist: ["s", "lookup*"] # Allowed dot commands (empty = allow all)
 
 channels:
   - chat_type: "say"
