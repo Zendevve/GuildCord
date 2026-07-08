@@ -127,7 +127,33 @@ def test_decode_name_query_response():
     print("test_decode_name_query_response passed.")
 
 
+def test_decode_messagechat_achievement():
+    # Constructing a sample WotLK SMSG_MESSAGECHAT packet for CHAT_MSG_GUILD_ACHIEVEMENT:
+    # msg_type = 0x31 (CHAT_MSG_GUILD_ACHIEVEMENT)
+    # language = -1 (LANG_UNIVERSAL or similar)
+    # sender_guid = 11111
+    # unk = 0
+    # target_guid = 0
+    # message = "earned achievement link..."
+    # chat_tag = 0
+    # achievement_id = 1180
+    import struct
+    msg_bytes = b"earned achievement link\x00"
+    body = struct.pack("<BiQIQ", 0x31, -1, 11111, 0, 0)
+    body += struct.pack("<I", len(msg_bytes))
+    body += msg_bytes
+    body += struct.pack("<BI", 0, 1180) # chat_tag, achievement_id
+    
+    msg = chat.decode_messagechat(body)
+    assert msg.msg_type == 0x31
+    assert msg.sender_guid == 11111
+    assert msg.message == "earned achievement link"
+    assert msg.achievement_id == 1180
+    print("test_decode_messagechat_achievement passed.")
+
+
 if __name__ == "__main__":
     test_decode_guild_event()
     test_decode_guild_roster()
     test_decode_name_query_response()
+    test_decode_messagechat_achievement()

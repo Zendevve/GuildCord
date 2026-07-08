@@ -43,6 +43,7 @@ class ChatMessage:
     message: str
     channel_name: str | None = None
     sender_name: str | None = None  # filled in later via CMSG_NAME_QUERY if desired
+    achievement_id: int | None = None
 
 
 def _read_cstring(buf: bytes, offset: int) -> tuple[str, int]:
@@ -88,7 +89,14 @@ def decode_messagechat(body: bytes) -> ChatMessage:
     offset += 4
     message = body[offset : offset + msg_len - 1].decode("utf-8", errors="replace")
     offset += msg_len
-    # trailing chat_tag (uint8) ignored
+    # trailing chat_tag (uint8)
+    offset += 1
+
+    achievement_id = None
+    if msg_type == opcodes.CHAT_MSG_GUILD_ACHIEVEMENT:
+        if offset + 4 <= len(body):
+            (achievement_id,) = struct.unpack_from("<I", body, offset)
+            offset += 4
 
     return ChatMessage(
         msg_type=msg_type,
@@ -96,6 +104,7 @@ def decode_messagechat(body: bytes) -> ChatMessage:
         sender_guid=sender_guid,
         message=message,
         channel_name=channel_name,
+        achievement_id=achievement_id,
     )
 
 
@@ -133,6 +142,7 @@ CHAT_TYPE_NAMES = {
     opcodes.CHAT_MSG_EMOTE: "Emote",
     opcodes.CHAT_MSG_CHANNEL: "Channel",
     opcodes.CHAT_MSG_SYSTEM: "System",
+    opcodes.CHAT_MSG_GUILD_ACHIEVEMENT: "Guild Achievement",
 }
 
 

@@ -60,11 +60,15 @@ class WowBridge:
             if mapping.direction not in ("wow_to_discord", "both"):
                 continue
             expected_type = CHAT_TYPE_BY_NAME.get(mapping.chat_type)
-            if expected_type != msg.msg_type:
-                continue
+            if msg.msg_type == wop.CHAT_MSG_GUILD_ACHIEVEMENT:
+                if expected_type != wop.CHAT_MSG_GUILD:
+                    continue
+            else:
+                if expected_type != msg.msg_type:
+                    continue
             if msg.msg_type == wop.CHAT_MSG_CHANNEL:
                 if (mapping.wow_channel or "").lower() != (
-                    msg.channel_name or ""
+                     msg.channel_name or ""
                 ).lower():
                     continue
             matches.append(mapping)
@@ -91,9 +95,12 @@ class WowBridge:
             resolved_message = mentions.resolve_wow_mentions(clean_message, channel)
 
             sender = msg.sender_name or f"guid:{msg.sender_guid}"
-            text = mapping.format.replace("%user", sender).replace(
-                "%message", resolved_message
-            )
+            if msg.msg_type == wop.CHAT_MSG_GUILD_ACHIEVEMENT:
+                text = f"🏆 **{sender}** has earned the achievement {resolved_message}!"
+            else:
+                text = mapping.format.replace("%user", sender).replace(
+                    "%message", resolved_message
+                )
             try:
                 await channel.send(text)
             except Exception:

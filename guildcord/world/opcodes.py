@@ -62,6 +62,7 @@ CHAT_MSG_WHISPER = 0x06
 CHAT_MSG_EMOTE = 0x0A
 CHAT_MSG_CHANNEL = 0x11
 CHAT_MSG_SYSTEM = 0x0F
+CHAT_MSG_GUILD_ACHIEVEMENT = 0x31
 
 # Language IDs (0 = universal, used for bridge-sent messages to avoid
 # skill-based language filtering)
