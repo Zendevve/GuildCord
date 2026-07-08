@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 from . import opcodes
-from .chat import ChatMessage, decode_messagechat, encode_messagechat
+from .chat import ChatMessage, decode_messagechat, encode_messagechat, decode_guild_event
 from .crypto import WorldCrypto
 
 ChatCallback = Callable[[ChatMessage], Awaitable[None]]
@@ -283,11 +283,14 @@ class WorldClient:
         body = struct.pack("<II", sequence, 50)  # sequence, latency(ms) placeholder
         await self._send_client_packet(opcodes.CMSG_PING, body)
 
-    async def run(self, on_chat: ChatCallback) -> None:
+    async def run(
+        self,
+        on_chat: ChatCallback,
+        on_guild_event: Callable[[int, list[str]], Awaitable[None]] | None = None,
+    ) -> None:
         """
         Main receive loop. Dispatches SMSG_MESSAGECHAT to `on_chat` and
-        replies to keepalive/ping-relevant traffic. Runs until close()
-        is called or the connection drops.
+        SMSG_GUILD_EVENT to `on_guild_event`, keeping connection alive.
         """
         self._chat_callback = on_chat
         self._running = True
@@ -313,9 +316,13 @@ class WorldClient:
                     except (struct.error, IndexError, ValueError):
                         continue
                     await on_chat(msg)
-                # All other opcodes (movement, spells, object updates,
-                # etc.) are intentionally ignored — this client only
-                # tracks enough state to relay chat.
+                elif op == opcodes.SMSG_GUILD_EVENT:
+                    if on_guild_event:
+                        try:
+                            event_type, strings = decode_guild_event(body)
+                        except (struct.error, IndexError, ValueError):
+                            continue
+                        await on_guild_event(event_type, strings)
         finally:
             ping_task.cancel()
             self._running = False

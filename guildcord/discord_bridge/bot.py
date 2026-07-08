@@ -125,6 +125,59 @@ class WowBridge:
             except Exception:
                 log.exception("failed to relay Discord message to WoW")
 
+    async def on_wow_guild_event(self, event_type: int, strings: list[str]) -> None:
+        if not strings or not strings[0].strip():
+            return
+
+        actor = strings[0]
+        # Skip events triggered by the bot's own character
+        if event_type != wop.GE_MOTD and self.wow_character_name and actor.lower() == self.wow_character_name.lower():
+            return
+
+        # Find the Discord channel mapped to the WoW guild chat
+        guild_channel_id = None
+        for mapping in self.config.channels:
+            if mapping.chat_type == "guild":
+                guild_channel_id = mapping.discord_channel_id
+                break
+
+        if not guild_channel_id:
+            return
+
+        channel = self.discord_client.get_channel(guild_channel_id)
+        if not channel:
+            return
+
+        # Format events into human-readable messages with rich emojis
+        if event_type == wop.GE_SIGNED_ON:
+            message = f"🟢 **{actor}** has logged on."
+        elif event_type == wop.GE_SIGNED_OFF:
+            message = f"🔴 **{actor}** has logged off."
+        elif event_type == wop.GE_JOINED:
+            message = f"🤝 **{actor}** has joined the guild."
+        elif event_type == wop.GE_LEFT:
+            message = f"🚶 **{actor}** has left the guild."
+        elif event_type == wop.GE_MOTD:
+            message = f"📢 **Guild Message of the Day:** {actor}"
+        elif event_type == wop.GE_REMOVED:
+            target = actor
+            kicker = strings[1] if len(strings) > 1 else "someone"
+            message = f"🥾 **{target}** was kicked by **{kicker}**."
+        elif event_type == wop.GE_PROMOTED:
+            promoter = actor
+            target = strings[1] if len(strings) > 1 else "someone"
+            rank = strings[2] if len(strings) > 2 else "new rank"
+            message = f"🔼 **{target}** was promoted by **{promoter}** to **{rank}**."
+        elif event_type == wop.GE_DEMOTED:
+            demoter = actor
+            target = strings[1] if len(strings) > 1 else "someone"
+            rank = strings[2] if len(strings) > 2 else "lower rank"
+            message = f"🔽 **{target}** was demoted by **{demoter}** to **{rank}**."
+        else:
+            return
+
+        await channel.send(message)
+
     # -----------------------------------------------------------
     # lifecycle
     # -----------------------------------------------------------
@@ -149,16 +202,26 @@ class WowBridge:
         await world.handshake()
         log.info("World auth handshake OK")
 
+        chars = await world.request_characters()
+        character_name = None
         character_guid = cfg.character_guid
         if character_guid is None:
-            chars = await world.request_characters()
             if not chars:
                 raise RuntimeError(
                     "no characters found on this account — create one, or "
                     "set wow.character_guid in config"
                 )
             character_guid = chars[0].guid
+            character_name = chars[0].name
             log.info("Auto-selected character: %s (guid=%s)", chars[0].name, chars[0].guid)
+        else:
+            # Try to match character name from GUID
+            for c in chars:
+                if c.guid == character_guid:
+                    character_name = c.name
+                    break
+
+        self.wow_character_name = character_name
 
         await world.enter_world(character_guid)
         log.info("Entered world successfully")
@@ -177,7 +240,9 @@ class WowBridge:
         await self.connect_wow()
         assert self.world is not None
 
-        world_task = asyncio.create_task(self.world.run(self.on_wow_chat))
+        world_task = asyncio.create_task(
+            self.world.run(self.on_wow_chat, self.on_wow_guild_event)
+        )
         try:
             await self.discord_client.start(self.config.discord.bot_token)
         finally:

@@ -118,3 +118,27 @@ CHAT_TYPE_NAMES = {
     opcodes.CHAT_MSG_CHANNEL: "Channel",
     opcodes.CHAT_MSG_SYSTEM: "System",
 }
+
+
+def decode_guild_event(body: bytes) -> tuple[int, list[str]]:
+    """
+    Decodes SMSG_GUILD_EVENT body:
+    uint8 event_type
+    uint8 num_strings
+    followed by num_strings null-terminated strings.
+    """
+    if len(body) < 2:
+        raise ValueError("guild event packet too short")
+    offset = 0
+    event_type = body[offset]
+    offset += 1
+    num_strings = body[offset]
+    offset += 1
+    strings = []
+    for _ in range(num_strings):
+        if offset >= len(body):
+            break
+        end = body.index(b"\x00", offset)
+        strings.append(body[offset:end].decode("utf-8", errors="replace"))
+        offset = end + 1
+    return event_type, strings
