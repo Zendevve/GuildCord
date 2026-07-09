@@ -17,11 +17,42 @@ wow:
   # the bot try auto-enum first and fall back to setting this if it fails.
   # character_guid: 123
 
+  # Reconnect tuning (all optional, shown here at their defaults).
+  # First retry after a dropped connection waits reconnect_base_delay
+  # seconds, doubling each attempt up to reconnect_max_delay. A
+  # rejected login (bad account/password) is treated differently —
+  # retrying fast won't fix bad credentials, so that case waits a flat
+  # reconnect_fatal_delay seconds between attempts instead of backing off.
+  # reconnect_base_delay: 5
+  # reconnect_max_delay: 300
+  # reconnect_fatal_delay: 300
+
 discord:
   bot_token: "YOUR_DISCORD_BOT_TOKEN"
   command_prefix: "!"
   enable_dot_commands: false             # Set to true to allow direct server commands from Discord
   dot_commands_whitelist: ["s", "lookup*"] # Allowed dot commands (empty = allow all)
+
+  # Optional: base URL of an item/spell database site that supports
+  # query-string lookups (?item=<id>, ?spell=<id>, ?quest=<id>,
+  # ?achievement=<id>) — e.g. wotlkdb.com or wotlk.evowow.com. Note
+  # Wowhead does NOT work here since it uses path-style URLs
+  # (wowhead.com/wotlk/item=<id>/slug) rather than a query string.
+  # When set, in-game item/spell/quest/achievement links get relayed
+  # to Discord as clickable links to f"{item_database}?item={id}" (or
+  # ?spell=/?quest=/?achievement=). Left unset, links still get
+  # relayed but as plain bold text with no URL — there's no hardcoded
+  # default site.
+  # item_database: "https://wotlkdb.com"
+
+  # Optional: a Discord channel ID where the bot posts connection status
+  # updates ("lost connection, reconnecting", "reconnected", "can't log
+  # in — check credentials"). Leave unset to disable these notifications.
+  # status_channel_id: 444444444444444444
+
+  # strftime format used for the %time token in channel message formats
+  # below. Uses the bot's local system time.
+  # time_format: "%H:%M:%S"
 
 channels:
   - chat_type: "say"
@@ -33,9 +64,31 @@ channels:
     discord_channel_id: 222222222222222222
     direction: "both"
     format: "🛡️ **%user**: %message"
+    # Example: block anything that looks like a gold-seller ad or a
+    # Discord invite link from relaying through this mapping. Each
+    # entry is a regex, checked case-insensitively; a message matching
+    # ANY of them is silently dropped for this mapping (other mappings
+    # of the same message are unaffected).
+    filters:
+      - "gold\\s*seller"
+      - "discord\\.gg/"
 
   - chat_type: "channel"
     wow_channel: "General"
     discord_channel_id: 333333333333333333
     direction: "wow_to_discord"
-    format: "[General] **%user**: %message"
+    # %time and %channel are also available, not just %user/%message.
+    format: "[%time] [%channel] **%user**: %message"
+
+  - chat_type: "emote"
+    discord_channel_id: 111111111111111111
+    direction: "wow_to_discord"
+    format: "_%user %message_"
+
+  - chat_type: "system"
+    discord_channel_id: 555555555555555555
+    direction: "wow_to_discord"  # system messages are server-generated;
+                                  # there's no such thing as sending one
+                                  # from Discord, so discord_to_wow/both
+                                  # don't make sense for this chat_type.
+    format: "📜 %message"

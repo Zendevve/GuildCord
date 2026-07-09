@@ -10,13 +10,15 @@ import logging
 
 import discord
 
-from ..auth.auth_client import AuthClient
+from ..auth.auth_client import AuthClient, FatalAuthError
+from ..common.backoff import BackoffPolicy
 from ..config.schema import BridgeConfig, ChannelMapping
 from ..world import opcodes as wop
 from ..world import resolver
 from ..world.chat import CHAT_TYPE_NAMES, ChatMessage, GuildMemberInfo, WhoMemberInfo
-from ..world.world_client import WorldClient
-from . import mentions
+from ..world.world_client import FatalWorldError, WorldClient
+from . import emoji, mentions
+from .formatting import format_relay_message, matches_any_filter
 
 log = logging.getLogger("guildcord")
 
@@ -29,6 +31,12 @@ CHAT_TYPE_BY_NAME = {
     "yell": wop.CHAT_MSG_YELL,
     "whisper": wop.CHAT_MSG_WHISPER,
     "channel": wop.CHAT_MSG_CHANNEL,
+    "emote": wop.CHAT_MSG_EMOTE,
+    # System messages are server-generated (broadcasts, etc.) — WoW's
+    # protocol doesn't have a way for a normal client to originate one,
+    # so a mapping using this chat_type is realistically wow_to_discord
+    # only, even though nothing here enforces that.
+    "system": wop.CHAT_MSG_SYSTEM,
 }
 
 
@@ -109,15 +117,25 @@ class WowBridge:
         return matches
 
     async def _send_wow_chat_to_discord(self, msg: ChatMessage) -> None:
-        clean_message = resolver.strip_color_coding(msg.message)
+        # Order matters here: resolve_links needs the hyperlink's own
+        # |c........|H...|h|r markup intact to recognize it, and that
+        # markup is itself shaped like a color span — if
+        # strip_color_coding ran first it would eat the leading |c code
+        # a hyperlink depends on, and resolve_links would never match.
+        # strip_color_coding runs second to mop up any color codes that
+        # aren't part of a link; it's safe to run after since resolved
+        # link text never itself contains |c/|r sequences.
         clean_message = resolver.resolve_links(
-            clean_message,
-            client_build=self.config.wow.client_build,
+            msg.message,
             link_site=self.config.discord.item_database,
         )
+        clean_message = resolver.strip_color_coding(clean_message)
 
         mappings = self._find_mapping_for_wow_message(msg)
         for mapping in mappings:
+            if matches_any_filter(mapping.filters, clean_message):
+                continue
+
             channel = self.discord_client.get_channel(mapping.discord_channel_id)
             if channel is None:
                 log.warning(
@@ -129,11 +147,16 @@ class WowBridge:
             resolved_message = mentions.resolve_wow_mentions(clean_message, channel)
 
             sender = msg.sender_name or f"guid:{msg.sender_guid}"
+            channel_label = msg.channel_name or CHAT_TYPE_NAMES.get(msg.msg_type, "")
             if msg.msg_type == wop.CHAT_MSG_GUILD_ACHIEVEMENT:
                 text = f"🏆 **{sender}** has earned the achievement {resolved_message}!"
             else:
-                text = mapping.format.replace("%user", sender).replace(
-                    "%message", resolved_message
+                text = format_relay_message(
+                    mapping.format,
+                    user=sender,
+                    message=resolved_message,
+                    channel=channel_label,
+                    time_format=self.config.discord.time_format,
                 )
             try:
                 await channel.send(text)
@@ -251,6 +274,11 @@ class WowBridge:
                 # To prevent spamming raw unrecognized commands into WoW, we return here
                 return
 
+        # Discord's <:name:id> / <a:name:id> custom emoji markup can't
+        # render in WoW — turn it into plain ":name:" text once, before
+        # any per-mapping processing below.
+        clean_content = emoji.resolve_discord_emoji(message.clean_content)
+
         for mapping in self.config.channels:
             if mapping.direction not in ("discord_to_wow", "both"):
                 continue
@@ -261,11 +289,14 @@ class WowBridge:
             if chat_type is None:
                 continue
 
+            if matches_any_filter(mapping.filters, clean_content):
+                continue
+
             # If dot command option is enabled and matched, send directly. Otherwise send formatted.
-            if self.should_send_directly(message.content):
-                content = message.clean_content
+            if self.should_send_directly(clean_content):
+                content = clean_content
             else:
-                content = f"[Discord] {message.author.display_name}: {message.clean_content}"
+                content = f"[Discord] {message.author.display_name}: {clean_content}"
                 if content.startswith("."):
                     content = " " + content
 
@@ -391,9 +422,13 @@ class WowBridge:
     async def connect_wow(self) -> None:
         cfg = self.config.wow
         auth = AuthClient(cfg.auth_host, cfg.auth_port, platform=cfg.platform)
-        await auth.connect()
-        login_result = await auth.login(cfg.account, cfg.password)
-        await auth.close()
+        try:
+            await auth.connect()
+            login_result = await auth.login(cfg.account, cfg.password)
+        finally:
+            # Always release the auth-server socket, whether login
+            # succeeded or raised (including FatalAuthError).
+            await auth.close()
         log.info("Auth handshake OK, session key derived")
 
         world = WorldClient(
@@ -404,46 +439,68 @@ class WowBridge:
             client_build=cfg.client_build,
             realm_id=cfg.realm_id,
         )
-        await world.connect()
-        await world.handshake()
-        log.info("World auth handshake OK")
+        try:
+            await world.connect()
+            await world.handshake()
+            log.info("World auth handshake OK")
 
-        chars = await world.request_characters()
-        character_name = None
-        character_guid = cfg.character_guid
-        if character_guid is None:
-            if not chars:
-                raise RuntimeError(
-                    "no characters found on this account — create one, or "
-                    "set wow.character_guid in config"
-                )
-            character_guid = chars[0].guid
-            character_name = chars[0].name
-            log.info("Auto-selected character: %s (guid=%s)", chars[0].name, chars[0].guid)
-        else:
-            # Try to match character name from GUID
-            for c in chars:
-                if c.guid == character_guid:
-                    character_name = c.name
-                    break
+            chars = await world.request_characters()
+            character_name = None
+            character_guid = cfg.character_guid
+            if character_guid is None:
+                if not chars:
+                    raise RuntimeError(
+                        "no characters found on this account — create one, or "
+                        "set wow.character_guid in config"
+                    )
+                character_guid = chars[0].guid
+                character_name = chars[0].name
+                log.info("Auto-selected character: %s (guid=%s)", chars[0].name, chars[0].guid)
+            else:
+                for c in chars:
+                    if c.guid == character_guid:
+                        character_name = c.name
+                        break
 
-        self.wow_character_name = character_name
+            self.wow_character_name = character_name
 
-        await world.enter_world(character_guid)
-        log.info("Entered world successfully")
+            await world.enter_world(character_guid)
+            log.info("Entered world successfully")
 
-        for mapping in self.config.channels:
-            if mapping.chat_type == "channel" and mapping.wow_channel:
-                try:
-                    await world.join_channel(mapping.wow_channel)
-                except Exception:
-                    log.exception("failed to join WoW channel %s", mapping.wow_channel)
+            for mapping in self.config.channels:
+                if mapping.chat_type == "channel" and mapping.wow_channel:
+                    try:
+                        await world.join_channel(mapping.wow_channel)
+                    except Exception:
+                        log.exception("failed to join WoW channel %s", mapping.wow_channel)
+        except Exception:
+            # Don't leak a half-open world-server socket across retries
+            # — every failure path above lands here before we've
+            # assigned `world` to self.world, so this is the only
+            # place that would otherwise forget to close it.
+            await world.close()
+            raise
 
         self.world = world
         try:
             await world.request_guild_roster()
         except Exception:
             log.exception("failed to request initial guild roster")
+
+    async def _notify_status(self, text: str) -> None:
+        """Posts a connection-status update to the configured status
+        channel, if any. Silently does nothing if unconfigured or if
+        the channel isn't resolvable yet (e.g. Discord not ready)."""
+        channel_id = self.config.discord.status_channel_id
+        if not channel_id:
+            return
+        channel = self.discord_client.get_channel(channel_id)
+        if channel is None:
+            return
+        try:
+            await channel.send(text)
+        except Exception:
+            log.exception("failed to send status notification")
 
     async def run(self) -> None:
         logging.basicConfig(level=logging.INFO)
@@ -453,17 +510,64 @@ class WowBridge:
             self.discord_client.start(self.config.discord.bot_token)
         )
 
+        cfg = self.config.wow
+        backoff = BackoffPolicy(
+            base_delay=cfg.reconnect_base_delay,
+            max_delay=cfg.reconnect_max_delay,
+        )
+        ever_connected = False
+        down_notified = False
+        fatal_notified = False
+
         try:
             # Reconnection loop for WoW
             while not self.discord_client.is_closed():
                 log.info("Connecting to WoW server...")
                 try:
-                    await self.connect_wow()
+                    # Bound the whole connect sequence — a server that
+                    # accepts the TCP connection but never responds
+                    # would otherwise hang here indefinitely instead of
+                    # hitting the backoff/retry logic below.
+                    await asyncio.wait_for(self.connect_wow(), timeout=60.0)
+                except (FatalAuthError, FatalWorldError) as exc:
+                    # The server explicitly rejected our credentials —
+                    # retrying at normal cadence just hammers it with
+                    # the same bad login over and over. Back off hard
+                    # and say so once, instead of spamming logs/Discord.
+                    log.error("WoW login rejected (check credentials/config): %s", exc)
+                    if not fatal_notified:
+                        await self._notify_status(
+                            f"⚠️ Can't log into the WoW account — the server "
+                            f"rejected it (`{exc}`). Check `account`/`password` "
+                            f"in config. I'll keep retrying every "
+                            f"{int(cfg.reconnect_fatal_delay)}s, but this won't "
+                            f"fix itself without a config change."
+                        )
+                        fatal_notified = True
+                    await asyncio.sleep(cfg.reconnect_fatal_delay)
+                    continue
                 except Exception as exc:
                     log.error("Failed to connect to WoW server: %s", exc)
-                    log.info("Retrying in 10 seconds...")
-                    await asyncio.sleep(10)
+                    if ever_connected and not down_notified:
+                        await self._notify_status(
+                            "🔴 Lost connection to the WoW server. Reconnecting..."
+                        )
+                        down_notified = True
+                    delay = backoff.next_delay()
+                    log.info(
+                        "Retrying in %.1fs (attempt %d)", delay, backoff.attempt
+                    )
+                    await asyncio.sleep(delay)
                     continue
+
+                # Connected successfully — reset backoff and clear any
+                # outage notifications from a prior failure streak.
+                if down_notified or fatal_notified:
+                    await self._notify_status("🟢 Reconnected to the WoW server.")
+                backoff.reset()
+                ever_connected = True
+                down_notified = False
+                fatal_notified = False
 
                 log.info("Connected to WoW server. Running event listener...")
 
@@ -496,8 +600,18 @@ class WowBridge:
                         await self.world.close()
                         self.world = None
 
-                log.info("Disconnected from WoW server. Reconnecting in 10 seconds...")
-                await asyncio.sleep(10)
+                if self.discord_client.is_closed():
+                    break
+
+                log.info("Disconnected from WoW server.")
+                if not down_notified:
+                    await self._notify_status(
+                        "🔴 Lost connection to the WoW server. Reconnecting..."
+                    )
+                    down_notified = True
+                delay = backoff.next_delay()
+                log.info("Retrying in %.1fs (attempt %d)", delay, backoff.attempt)
+                await asyncio.sleep(delay)
 
         finally:
             await self.discord_client.close()

@@ -33,6 +33,32 @@ ChatCallback = Callable[[ChatMessage], Awaitable[None]]
 
 
 class WorldError(Exception):
+    """Raised for world-server protocol errors."""
+
+    pass
+
+
+class FatalWorldError(WorldError):
+    """
+    Raised when the world server explicitly rejects the auth session
+    (bad account) rather than a transient issue. See FatalAuthError in
+    auth_client.py for the same reasoning — no point retrying at normal
+    cadence against a rejection that won't change on its own.
+    """
+
+    pass
+
+
+class ConnectionStale(WorldError):
+    """
+    Raised when no packet arrives from the server for longer than
+    `stale_timeout` seconds. WoW's world server doesn't always cleanly
+    close a dead TCP connection (e.g. the process hung, or a NAT/firewall
+    silently dropped it), so relying solely on read errors to detect a
+    disconnect can leave the bridge stuck waiting indefinitely. This is
+    a generic "the other end has gone quiet" timeout, not WoW-specific.
+    """
+
     pass
 
 
@@ -52,6 +78,7 @@ class WorldClient:
         session_key: bytes,
         client_build: int = 12340,
         realm_id: int = 1,
+        stale_timeout: float = 90.0,
     ):
         self.host = host
         self.port = port
@@ -59,6 +86,11 @@ class WorldClient:
         self.session_key = session_key
         self.client_build = client_build
         self.realm_id = realm_id
+        # No packet at all (not even a ping reply) for this long means
+        # the connection is dead even if the socket hasn't errored yet.
+        # 90s = 3x the 30s ping interval, so we tolerate a couple of
+        # missed beats before giving up.
+        self.stale_timeout = stale_timeout
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -89,7 +121,15 @@ class WorldClient:
 
     async def _read_exact(self, n: int) -> bytes:
         assert self._reader is not None
-        return await self._reader.readexactly(n)
+        try:
+            return await asyncio.wait_for(
+                self._reader.readexactly(n), timeout=self.stale_timeout
+            )
+        except asyncio.TimeoutError as exc:
+            raise ConnectionStale(
+                f"no data from world server for {self.stale_timeout}s, "
+                f"treating connection as dead"
+            ) from exc
 
     async def _read_server_packet(self) -> tuple[int, bytes]:
         """
@@ -187,6 +227,11 @@ class WorldClient:
             raise WorldError(f"expected SMSG_AUTH_RESPONSE, got opcode {op:#x}")
         result = body[0]
         if result != opcodes.AUTH_OK:
+            if result == opcodes.AUTH_UNKNOWN_ACCOUNT:
+                raise FatalWorldError(
+                    f"world server rejected auth session — unknown account, "
+                    f"code={result:#x}"
+                )
             raise WorldError(f"world server rejected auth session, code={result:#x}")
 
     async def handshake(self) -> None:

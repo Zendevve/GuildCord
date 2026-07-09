@@ -1,75 +1,117 @@
 """
-Helper functions to strip WoW in-game color codes and resolve links
-(items, spells, quests, achievements) into clickable web database URLs.
+Resolves WoW in-game hyperlinks (items, spells, quests, achievements,
+enchants, talents, etc.) into Discord-friendly text, and strips WoW's
+raw color-code markup.
+
+Built from Blizzard's publicly documented client hyperlink format (see
+e.g. Warcraft Wiki / Wowpedia's "Hyperlinks", "ItemLink", and
+"SpellLink" pages) — the text format the client embeds in chat
+messages — not from any bridge bot's source. Every hyperlink type
+shares one shape:
+
+    |c<AARRGGBB>|H<linktype>:<id>[:<extra colon-separated fields>]|h[<display text>]|h|r
+
+e.g.
+    |cff9d9d9d|Hitem:7073:0:0:0:0:0:0:0|h[Broken Fang]|h|r
+    |cff71d5ff|Hspell:10060|h[Power Infusion]|h|r
+
+Wowpedia's SpellLink page notes that spell/enchant/quest/talent links
+all follow this same shape, differing only in the type prefix and
+payload — which is why this module matches every kind with one general
+pattern below instead of a separate regex per link type.
 """
 
 from __future__ import annotations
 
 import re
+from typing import Optional
 
-# Regex to match hex color codes like |cff00ff00 and their corresponding reset |r
-# Format: |c(AARRGGBB)text|r
-COLOR_CODE_RE = re.compile(r"\|c[0-9a-fA-F]{8}(.*?)\|r")
-RAW_COLOR_START_RE = re.compile(r"\|c[0-9a-fA-F]{8}")
-RAW_COLOR_END_RE = re.compile(r"\|r")
+# --- color markup -------------------------------------------------------
+#
+# WoW color codes wrap a span of text as |c<8 hex AARRGGBB>...text...|r.
+# Strip these before display since Discord doesn't render them. Handle
+# balanced pairs first (keeping the inner text), then clean up any
+# stray/unbalanced markers a partial or truncated message might contain.
 
-# WotLK-specific link regexes
-# Item link format: |cff9d9d9d|Hitem:7078:0:0:0:0:0:0:0|h[Artifact Recipe: Lesser Invisibility Elixir]|h|r
-ITEM_RE = re.compile(r"\|.+?\|Hitem:(\d+):.+?\|h\[(.+?)\]\|h\|r")
-# Spell / Enchant / Talent link format: |cff71d5ff|Hspell:2060|h[Greater Heal]|h|r
-SPELL_RE = re.compile(r"\|.+?\|(?:Hspell|Henchant|Htalent)?:(\d+).*?\|h\[(.+?)\]\|h\|r")
-# Quest link format: |cffffd000|Hquest:1001:60|h[A New Hope]|h|r
-QUEST_RE = re.compile(r"\|.+?\|Hquest:(\d+):.+?\|h\[(.+?)\]\|h\|r")
-# Achievement link format: |cffffff00|Hachievement:1180:0000000000000000:0:0:0:0|h[Hero of the Shattered Sun]|h|r
-ACHIEVEMENT_RE = re.compile(r"\|.+?\|Hachievement:(\d+):.+?\|h\[(.+?)\]\|h\|r")
-# Trade link format: |Htrade:51300:280:280:80000:7E17E3D3|h[Tailoring]|h
-TRADE_RE = re.compile(r"\|Htrade:(\d+):.+?\|h\[(.+?)\]\|h")
+_COLOR_SPAN_RE = re.compile(r"\|c[0-9A-Fa-f]{8}(.*?)\|r", re.DOTALL)
+_STRAY_COLOR_START_RE = re.compile(r"\|c[0-9A-Fa-f]{8}")
+_STRAY_COLOR_END_RE = re.compile(r"\|r")
 
 
 def strip_color_coding(message: str) -> str:
-    """
-    Removes WoW-specific color coding markup.
-    e.g. "|cff00ff00Hello|r" -> "Hello"
-    """
-    # Replace balanced color blocks with their text
-    res = COLOR_CODE_RE.sub(r"\1", message)
-    # Strip any stray or unbalanced color codes
-    res = RAW_COLOR_START_RE.sub("", res)
-    res = RAW_COLOR_END_RE.sub("", res)
-    return res
-
-
-def resolve_links(message: str, client_build: int = 12340, link_site: str | None = None) -> str:
-    """
-    Finds in-game WoW item, spell, quest, achievement, and trade links,
-    and replaces them with Discord-compatible markdown links pointing to a database site.
-    """
-    if not link_site:
-        # Default database website based on build
-        # 12340 is 3.3.5a (WotLK)
-        if client_build < 8606:      # Vanilla (< 2.0.1)
-            link_site = "https://classicdb.ch"
-        elif client_build < 12340:   # TBC (< 3.0.2)
-            link_site = "https://tbc-twinhead.twinstar.cz"
-        else:                        # WotLK / default
-            link_site = "https://wotlk-twinhead.twinstar.cz"
-
-    # Ensure link_site doesn't end with a slash for clean query parameters
-    link_site = link_site.rstrip("/")
-
-    # Resolve items
-    message = ITEM_RE.sub(rf"[\2]({link_site}?item=\1)", message)
-
-    # Resolve spells / enchants
-    message = SPELL_RE.sub(rf"[\2]({link_site}?spell=\1)", message)
-
-    # Resolve quests
-    message = QUEST_RE.sub(rf"[\2]({link_site}?quest=\1)", message)
-
-    # Resolve achievements
-    message = ACHIEVEMENT_RE.sub(rf"[\2]({link_site}?achievement=\1)", message)
-
-    # Resolve trades
-    message = TRADE_RE.sub(rf"[\2]({link_site}?spell=\1)", message)
-
+    """Removes WoW color markup, e.g. '|cff00ff00Hello|r' -> 'Hello'."""
+    message = _COLOR_SPAN_RE.sub(r"\1", message)
+    message = _STRAY_COLOR_START_RE.sub("", message)
+    message = _STRAY_COLOR_END_RE.sub("", message)
     return message
+
+
+# --- hyperlinks -----------------------------------------------------------
+#
+# One general pattern for every hyperlink kind, per the shared-shape
+# note above. `kind` and `id` are captured so the caller can decide how
+# (or whether) to turn them into a URL; `text` is always the bracketed
+# display name.
+#
+# The color prefix is matched as a literal 8-hex-digit group (exactly
+# what it is on the wire) rather than a generic "anything" wildcard —
+# tighter, and avoids accidentally matching unrelated pipe-delimited
+# content elsewhere in a message. The payload tail is matched as
+# "everything that isn't a pipe" up to |h, since it's always a run of
+# colon-separated numbers with no pipe characters in it.
+
+_HYPERLINK_RE = re.compile(
+    r"\|c[0-9A-Fa-f]{8}"                 # color prefix, e.g. |cff9d9d9d
+    r"\|H(?P<kind>[A-Za-z]+)"            # link type, e.g. item / spell / quest
+    r":(?P<id>-?\d+)"                    # first payload field — the actual ID
+    r"[^|]*"                             # any remaining :field:field... payload
+    r"\|h\[(?P<text>[^\]]+)\]\|h\|r"     # |h[Display Name]|h|r
+)
+
+# Maps a link kind (lowercased) to the URL query parameter a typical
+# item/spell database site expects for it. Kinds not listed here still
+# get their display text shown (as bold), just without a hyperlink.
+_KIND_TO_QUERY_PARAM = {
+    "item": "item",
+    "spell": "spell",
+    "enchant": "spell",
+    "talent": "spell",
+    "glyph": "spell",
+    "quest": "quest",
+    "achievement": "achievement",
+    "trade": "spell",
+}
+
+
+def resolve_links(message: str, link_site: Optional[str] = None) -> str:
+    """
+    Replaces in-game hyperlinks with Discord-friendly text.
+
+    If `link_site` is configured, links become clickable Markdown
+    pointing at f"{link_site}?{param}={id}" — this assumes the site
+    supports query-string lookups (?item=<id>, ?spell=<id>, etc.), which
+    e.g. wotlkdb.com and wotlk.evowow.com do, but Wowhead does NOT
+    (it uses path-style URLs like wowhead.com/wotlk/item=<id>/slug
+    instead). Point this at a query-string-style site, or leave it
+    unset.
+
+    If it's not configured, links render as plain bold item names with
+    no hyperlink — deliberately no hardcoded fallback database. Which
+    fan site to send players to isn't something this project should
+    decide on a server owner's behalf; it's opt-in via the
+    `item_database` config field instead.
+    """
+
+    def _replace(match: "re.Match[str]") -> str:
+        kind = match.group("kind").lower()
+        link_id = match.group("id")
+        text = match.group("text")
+
+        if link_site and kind in _KIND_TO_QUERY_PARAM:
+            param = _KIND_TO_QUERY_PARAM[kind]
+            base = link_site.rstrip("/")
+            return f"[{text}]({base}?{param}={link_id})"
+
+        return f"**{text}**"
+
+    return _HYPERLINK_RE.sub(_replace, message)

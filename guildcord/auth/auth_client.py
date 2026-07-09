@@ -62,7 +62,30 @@ from . import opcodes, srp6
 
 
 class AuthError(Exception):
+    """Raised for any auth-server rejection or protocol confusion."""
+
     pass
+
+
+class FatalAuthError(AuthError):
+    """
+    Raised specifically when the server explicitly rejects the account,
+    password, or client version. Unlike a network blip or an unexpected
+    opcode (which might be transient — server restarting, brief network
+    issue), these codes mean the server looked at our credentials and
+    said no. Retrying immediately with the same credentials will just
+    fail again, so callers should back off much more slowly (or stop
+    and alert an operator) rather than retrying at normal cadence.
+    """
+
+    pass
+
+
+_FATAL_LOGON_RESULTS = {
+    opcodes.WOW_FAIL_UNKNOWN_ACCOUNT,
+    opcodes.WOW_FAIL_INCORRECT_PASSWORD,
+    opcodes.WOW_FAIL_VERSION_INVALID,
+}
 
 
 @dataclass
@@ -142,6 +165,11 @@ class AuthClient:
         _unused_error = (await self._read_exact(1))[0]
         result = (await self._read_exact(1))[0]
         if result != opcodes.WOW_SUCCESS:
+            if result in _FATAL_LOGON_RESULTS:
+                raise FatalAuthError(
+                    f"logon challenge rejected — bad account/password/version, "
+                    f"server result={result:#x}"
+                )
             raise AuthError(f"logon challenge failed, server result={result:#x}")
 
         B_bytes = await self._read_exact(32)
@@ -180,7 +208,11 @@ class AuthClient:
             raise AuthError(f"unexpected opcode in proof response: {cmd:#x}")
         error = (await self._read_exact(1))[0]
         if error != opcodes.WOW_SUCCESS:
-            raise AuthError(f"logon proof rejected by server, error={error:#x}")
+            # A proof-stage rejection means the server accepted the
+            # account name but our password-derived proof didn't match
+            # — i.e. wrong password. Same "won't fix itself" category
+            # as the challenge-stage fatal codes.
+            raise FatalAuthError(f"logon proof rejected by server, error={error:#x}")
 
         M2 = await self._read_exact(20)
         _account_flags = await self._read_exact(4)
